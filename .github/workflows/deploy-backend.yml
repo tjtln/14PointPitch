@@ -1,0 +1,84 @@
+name: Deploy Backend
+
+on:
+  workflow_call:
+    outputs:
+      api-url:
+        description: Deployed backend HTTP API URL
+        value: ${{ jobs.deploy.outputs.api-url }}
+      websocket-url:
+        description: Deployed backend WebSocket API URL
+        value: ${{ jobs.deploy.outputs.websocket-url }}
+
+env:
+  AWS_REGION: us-east-1
+  BACKEND_STACK_NAME: 14-point-pitch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    outputs:
+      api-url: ${{ steps.backend-outputs.outputs.api_url }}
+      websocket-url: ${{ steps.backend-outputs.outputs.websocket_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      - name: Build shared package
+        run: npm run build:shared
+
+      - name: Build backend package
+        run: npm run build:backend
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure AWS SAM is installed
+        run: pip install aws-sam-cli
+
+      - name: Build backend SAM application
+        working-directory: backend
+        run: sam build --template-file template.yaml
+
+      - name: Deploy backend SAM application
+        working-directory: backend
+        run: |
+          sam deploy \
+            --config-file samconfig.toml \
+            --stack-name "$BACKEND_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --resolve-s3
+
+      - name: Read backend stack outputs
+        id: backend-outputs
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$BACKEND_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+
+          WEBSOCKET_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$BACKEND_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='WebSocketUrl'].OutputValue" \
+            --output text)
+
+          echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
+          echo "websocket_url=$WEBSOCKET_URL" >> "$GITHUB_OUTPUT"

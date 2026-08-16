@@ -1,0 +1,23 @@
+name: Deploy
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+jobs:
+  backend:
+    uses: ./.github/workflows/deploy-backend.yml
+    secrets: inherit
+
+  frontend:
+    needs: backend
+    uses: ./.github/workflows/deploy-frontend.yml
+    with:
+      api-url: ${{ needs.backend.outputs.api-url }}
+      websocket-url: ${{ needs.backend.outputs.websocket-url }}
+    secrets: inherit

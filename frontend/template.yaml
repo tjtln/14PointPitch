@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Static hosting for the 14 Point Pitch frontend (S3 + CloudFront).
+  Deployed as its own stack, independent of the backend API stack
+  (backend/template.yaml). This template has no AWS::Serverless::Function
+  resources, so it intentionally has no SAM Transform; it's deployable with
+  either `sam deploy` or `aws cloudformation deploy`.
+
+Resources:
+
+  # Private bucket — nothing is public here. CloudFront reaches it
+  # only via Origin Access Control (OAC), enforced by the bucket
+  # policy below.
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+
+        Origins:
+          - Id: FrontendBucketOrigin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+
+            # Required even when using OAC — left blank so
+            # CloudFront relies on OAC (SigV4) instead of the
+            # legacy Origin Access Identity mechanism.
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+
+          # AWS managed "CachingOptimized" policy — long-lived,
+          # compression-aware caching with no forwarded query
+          # strings/cookies. Fine for a static SPA bundle.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+        # React Router does client-side routing, so a direct load
+        # or refresh on e.g. /game/ABCDE doesn't correspond to a real S3
+        # object. Rewrite both "not found" and "access denied" (the
+        # private bucket returns 403, not 404, for missing keys)
+        # back to index.html and let the app's own router take it
+        # from there.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+
+  # Grants CloudFront (and only this specific distribution) read
+  # access to the bucket. This is what OAC actually enforces —
+  # without it the bucket has no public or CloudFront access at all.
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+
+    Properties:
+      Bucket: !Ref FrontendBucket
+
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+
+
+Outputs:
+
+  BucketName:
+    Description: S3 bucket to sync the built frontend into
+    Value: !Ref FrontendBucket
+
+  DistributionId:
+    Description: CloudFront distribution ID (needed for cache invalidation)
+    Value: !Ref FrontendDistribution
+
+  Url:
+    Description: Public URL for the frontend
+    Value: !Sub https://${FrontendDistribution.DomainName}

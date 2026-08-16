@@ -1,0 +1,367 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: 14 Point Pitch serverless backend
+
+# Every function is built via the "makefile" method: `npm run build:backend`
+# (via esbuild, see backend/scripts/bundle.mjs) produces one self-contained
+# bundle per function in dist-lambda/, already including @pitch/shared —
+# an unpublished npm workspace package that `sam build`'s own npm-install
+# step can't resolve on its own. The Makefile below just copies the
+# already-built bundle into place; see backend/Makefile.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    CodeUri: .
+    Timeout: 20
+    MemorySize: 512
+
+    Environment:
+      Variables:
+        GAMES_TABLE: !Ref GamesTable
+        PLAYERS_TABLE: !Ref PlayersTable
+        CONNECTIONS_TABLE: !Ref ConnectionsTable
+
+
+Resources:
+
+  # ============================================================
+  # DynamoDB
+  # ============================================================
+
+  # gameId is the join code players type in to connect. The whole game's
+  # state (players, current round, hands, scores) lives in one item, mutated
+  # via optimistic locking on `version` — see backend/src/shared/repositories/gamesRepository.ts.
+  GamesTable:
+    Type: AWS::DynamoDB::Table
+
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      TableName: pitch-games
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: gameId
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: gameId
+          KeyType: HASH
+
+
+  # A player's name IS their identity — no password. gamesPlayed/gamesWon
+  # accumulate across every game that player has ever joined.
+  PlayersTable:
+    Type: AWS::DynamoDB::Table
+
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      TableName: pitch-players
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: name
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: name
+          KeyType: HASH
+
+
+  # One row per live WebSocket connection. GameIndex lets a broadcast look up
+  # every connection in a game (to push state) without a table scan.
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+    Properties:
+      TableName: pitch-connections
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+
+        - AttributeName: gameId
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+
+      GlobalSecondaryIndexes:
+        - IndexName: GameIndex
+
+          KeySchema:
+            - AttributeName: gameId
+              KeyType: HASH
+
+          Projection:
+            ProjectionType: ALL
+
+
+  # ============================================================
+  # HTTP API — lobby (create/look up a game) and stats, no auth
+  # ============================================================
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+
+
+  LobbyFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: lobby.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+
+      Events:
+        CreateGameApi:
+          Type: HttpApi
+          Properties:
+            Path: /games
+            Method: POST
+            ApiId: !Ref HttpApi
+
+        GetGameApi:
+          Type: HttpApi
+          Properties:
+            Path: /games/{gameId}
+            Method: GET
+            ApiId: !Ref HttpApi
+
+
+  StatsFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: stats.main
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PlayersTable
+
+      Events:
+        LeaderboardApi:
+          Type: HttpApi
+          Properties:
+            Path: /leaderboard
+            Method: GET
+            ApiId: !Ref HttpApi
+
+        PlayerStatsApi:
+          Type: HttpApi
+          Properties:
+            Path: /players/{name}
+            Method: GET
+            ApiId: !Ref HttpApi
+
+
+  # ============================================================
+  # WebSocket API — live gameplay
+  #
+  # A single AWS::Serverless::WebSocketApi resource owns every route;
+  # each Lambda below is just a plain function with no Events block —
+  # SAM wires up the integration, route, and invoke permission for us
+  # from the Routes map.
+  # ============================================================
+
+  WebSocketApi:
+    Type: AWS::Serverless::WebSocketApi
+
+    Properties:
+      Name: pitch-websocket
+      StageName: prod
+      # Custom game actions (bid/chooseTrump/playCard/startNextRound) are
+      # routed by an "action" field in the JSON message body; $connect and
+      # $disconnect are the two built-in lifecycle routes.
+      RouteSelectionExpression: $request.body.action
+
+      Routes:
+        $connect:
+          FunctionArn: !GetAtt ConnectFunction.Arn
+        $disconnect:
+          FunctionArn: !GetAtt DisconnectFunction.Arn
+        bid:
+          FunctionArn: !GetAtt BidFunction.Arn
+        chooseTrump:
+          FunctionArn: !GetAtt ChooseTrumpFunction.Arn
+        playCard:
+          FunctionArn: !GetAtt PlayCardFunction.Arn
+        startNextRound:
+          FunctionArn: !GetAtt StartNextRoundFunction.Arn
+
+
+  # $connect carries ?gameId=...&name=... on the WS URL and seats (or
+  # reconnects) that player.
+  ConnectFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: onConnect.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlayersTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  # $disconnect — the player's seat is kept (so they can reconnect by name),
+  # just marked disconnected.
+  DisconnectFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: onDisconnect.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  BidFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: bid.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlayersTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  ChooseTrumpFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: chooseTrump.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlayersTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  PlayCardFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: playCard.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlayersTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  StartNextRoundFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: startNextRound.main
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConnectionsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PlayersTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  # ============================================================
+  # Outputs
+  # ============================================================
+
+Outputs:
+
+  ApiUrl:
+    Description: Backend HTTP API endpoint (lobby + stats)
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+
+  WebSocketUrl:
+    Description: Backend WebSocket API endpoint (live gameplay)
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod

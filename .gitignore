@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-lambda/
+.aws-sam/
+*.tsbuildinfo
+.env
+.env.production
+.env.local
+samconfig-local.toml
+.DS_Store
