@@ -30,7 +30,13 @@ export function useGameSocket(gameId: string, name: string): GameSocket {
     const socket = new WebSocket(url);
     socketRef.current = socket;
 
-    socket.onopen = () => setConnected(true);
+    socket.onopen = () => {
+      setConnected(true);
+      // $connect can't reliably push state back to the connection that's
+      // still connecting (API Gateway hasn't fully registered it yet), so
+      // this is how we get our first state — see backend's sync route.
+      socket.send(JSON.stringify({ action: 'sync' }));
+    };
     socket.onclose = () => setConnected(false);
     socket.onerror = () => setError('Connection error — check the game code and try again');
 

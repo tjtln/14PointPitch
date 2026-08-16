@@ -14,6 +14,7 @@ const functions = [
   { name: 'stats', entry: 'src/functions/stats/handler.ts' },
   { name: 'onConnect', entry: 'src/functions/connection/onConnect.ts' },
   { name: 'onDisconnect', entry: 'src/functions/connection/onDisconnect.ts' },
+  { name: 'sync', entry: 'src/functions/connection/sync.ts' },
   { name: 'bid', entry: 'src/functions/gameplay/bid.ts' },
   { name: 'chooseTrump', entry: 'src/functions/gameplay/chooseTrump.ts' },
   { name: 'playCard', entry: 'src/functions/gameplay/playCard.ts' },

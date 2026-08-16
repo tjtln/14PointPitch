@@ -208,6 +208,8 @@ Resources:
           FunctionArn: !GetAtt ConnectFunction.Arn
         $disconnect:
           FunctionArn: !GetAtt DisconnectFunction.Arn
+        sync:
+          FunctionArn: !GetAtt SyncFunction.Arn
         bid:
           FunctionArn: !GetAtt BidFunction.Arn
         chooseTrump:
@@ -257,6 +259,30 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref GamesTable
         - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+        - Statement:
+            Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+
+
+  # "sync" — sent by the client right after the socket opens. $connect can't
+  # reliably push state back to the connection that's still connecting (see
+  # backend/src/functions/connection/sync.ts), so this is how a freshly
+  # connected client gets its first state.
+  SyncFunction:
+    Type: AWS::Serverless::Function
+
+    Metadata:
+      BuildMethod: makefile
+
+    Properties:
+      Handler: sync.main
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
             TableName: !Ref ConnectionsTable
         - Statement:
             Effect: Allow

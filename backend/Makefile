@@ -22,6 +22,10 @@ build-DisconnectFunction:
 	mkdir -p "$(ARTIFACTS_DIR)"
 	cp dist-lambda/onDisconnect.js "$(ARTIFACTS_DIR)/"
 
+build-SyncFunction:
+	mkdir -p "$(ARTIFACTS_DIR)"
+	cp dist-lambda/sync.js "$(ARTIFACTS_DIR)/"
+
 build-BidFunction:
 	mkdir -p "$(ARTIFACTS_DIR)"
 	cp dist-lambda/bid.js "$(ARTIFACTS_DIR)/"
