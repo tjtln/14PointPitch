@@ -23,6 +23,10 @@ export const main = async (event: APIGatewayProxyWebsocketEventV2): Promise<APIG
     return { statusCode: 400, body: 'gameId and name query string parameters are required' };
   }
 
+  console.log(
+    `onConnect: connectionId=${connectionId} gameId=${gameId} name=${name} domainName=${event.requestContext.domainName} stage=${event.requestContext.stage}`
+  );
+
   let seat: Seat | undefined;
 
   try {
