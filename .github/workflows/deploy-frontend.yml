@@ -14,7 +14,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  FRONTEND_STACK_NAME: 14-point-pitch-frontend
+  FRONTEND_STACK_NAME: pitch-frontend
 
 jobs:
   deploy:

@@ -3,7 +3,7 @@
 version = 0.1
 
 [default.global.parameters]
-stack_name = "14-point-pitch-frontend"
+stack_name = "pitch-frontend"
 
 [default.deploy.parameters]
 capabilities = "CAPABILITY_IAM"

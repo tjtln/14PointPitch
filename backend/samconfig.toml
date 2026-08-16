@@ -3,7 +3,7 @@
 version = 0.1
 
 [default.global.parameters]
-stack_name = "14-point-pitch"
+stack_name = "pitch-backend"
 
 [default.build.parameters]
 cached = true
